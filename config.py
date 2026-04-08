@@ -30,29 +30,61 @@ FRAME_HEIGHT = 720
 YOLO_MODEL = os.getenv("YOLO_MODEL", "yolov8n.pt")
 YOLO_CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.35"))
 
-# we map COCO pretrained classes to brand names for demo purposes
-# in production, you'd train a custom model on actual brand logos
+# COCO class -> brand label mapping
+# YOLO detects generic objects. We map relevant ones to ad placement zones
+# but NOT directly to brands. Brands are identified by OCR text only.
+# This map is used to know WHICH COCO detections are interesting for analysis.
 BRAND_LABEL_MAP = {
     "sports ball": "MRF",
-    "tv": "Scoreboard_Zone",
-    "laptop": "Overlay_Zone",
-    "cell phone": "Jio",
-    "bottle": "Pepsi",
-    "cup": "Coca-Cola",
-    "bowl": "CEAT",
-    "clock": "Paytm",
-    "book": "Dream11",
-    "umbrella": "PhonePe",
-    "handbag": "Byju's",
-    "backpack": "Tata",
-    "tie": "MPL",
+    "tv":          "Scoreboard_Zone",
+    "laptop":      "Overlay_Zone",
+    "cell phone":  "Jio",
+    "bottle":      "Pepsi",
+    "cup":         "Boost",
+    "clock":       "Paytm",
+    "book":        "Dream11",
+    "umbrella":    "PhonePe",
+    "handbag":     "Byju's",
+    "backpack":    "Tata",
+    "tie":         "MPL",
+    "bowl":        "CEAT",
+    "person":      "Player_Detected",
 }
 
+# Known brand names for OCR matching
 KNOWN_BRANDS = [
-    "Pepsi", "Coca-Cola", "MRF", "CEAT", "Dream11",
+    "Boost", "Pepsi", "MRF", "CEAT", "Dream11",
     "Jio", "Paytm", "PhonePe", "Byju's", "Tata",
     "MPL", "Swiggy", "Unacademy", "VIVO", "Star Sports",
+    "Thums Up", "Sprite", "Bournvita", "Coca-Cola",
 ]
+
+# OCR-based brand correction: if OCR reads actual text, override YOLO label
+BRAND_TEXT_PATTERNS = {
+    "BOOST":       "Boost",
+    "COCA":        "Coca-Cola",
+    "PEPSI":       "Pepsi",
+    "THUMS UP":    "Thums Up",
+    "THUMSUP":     "Thums Up",
+    "SPRITE":      "Sprite",
+    "JIO":         "Jio",
+    "DREAM11":     "Dream11",
+    "DREAM 11":    "Dream11",
+    "PAYTM":       "Paytm",
+    "PHONEPE":     "PhonePe",
+    "PHONE PE":    "PhonePe",
+    "BYJUS":       "Byju's",
+    "BYJU":        "Byju's",
+    "CEAT":        "CEAT",
+    "MRF":         "MRF",
+    "MPL":         "MPL",
+    "SWIGGY":      "Swiggy",
+    "UNACADEMY":   "Unacademy",
+    "VIVO":        "VIVO",
+    "STAR SPORTS": "Star Sports",
+    "TATA":        "Tata",
+    "BOURNVITA":   "Bournvita",
+}
 
 # placement classification using vertical position ratios
 PLACEMENT_RULES = [
@@ -62,18 +94,22 @@ PLACEMENT_RULES = [
     (0.20, 0.80, "jersey"),
 ]
 
-# keywords we look for via OCR to detect cricket events
+# keywords for cricket event detection via OCR
 EVENT_KEYWORDS = {
-    "SIX": "six",
-    "FOUR": "four",
-    "OUT": "wicket",
-    "WICKET": "wicket",
-    "WIDE": "wide",
-    "NO BALL": "no_ball",
+    "SIX":      "six",
+    "FOUR":     "four",
+    "OUT":      "wicket",
+    "WICKET":   "wicket",
+    "WIDE":     "wide",
+    "NO BALL":  "no_ball",
     "BOUNDARY": "four",
 }
 
-# rag and llm
+# Gemini LLM settings (free tier)
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+
+# Legacy OpenAI settings (optional fallback)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 LLM_MODEL = os.getenv("LLM_MODEL", "gpt-3.5-turbo")

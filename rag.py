@@ -1,9 +1,10 @@
 """
 RAG module using ChromaDB for vector storage and retrieval.
-Supports OpenAI for answer generation, with a keyword-based fallback.
+Uses Gemini LLM (free tier) for answer generation, with a keyword-based fallback.
+Supports context memory for follow-up questions in the chatbot.
 """
 import logging
-from config import CHROMA_DIR, OPENAI_API_KEY, EMBEDDING_MODEL, LLM_MODEL
+from config import CHROMA_DIR, GEMINI_API_KEY, OPENAI_API_KEY, EMBEDDING_MODEL, LLM_MODEL
 from utils import flatten_detections_for_rag
 
 log = logging.getLogger(__name__)
@@ -13,6 +14,10 @@ _collection = None
 _embedder = None
 
 COLLECTION_NAME = "cricket_brand_detections"
+
+# conversation context memory for chatbot follow-ups
+_conversation_history = []
+MAX_HISTORY = 10
 
 
 def _get_chroma():
@@ -116,7 +121,15 @@ def retrieve_context(query, n_results=10):
 
 # ---- Answer a natural language query ----
 
-def answer_query(query):
+def answer_query(query, conversation_context=None):
+    """
+    Answer a query using RAG: retrieve relevant documents, then generate
+    an answer using Gemini LLM (primary) or fallback logic.
+    
+    Supports conversation context for follow-up questions.
+    """
+    global _conversation_history
+
     context_docs = retrieve_context(query, n_results=15)
 
     if not context_docs:
@@ -128,10 +141,73 @@ def answer_query(query):
         for d in context_docs
     ])
 
-    if OPENAI_API_KEY:
-        return _ask_openai(query, context_text)
+    # build conversation context string for follow-up questions
+    history_text = ""
+    if conversation_context:
+        history_text = "\n".join([
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content'][:200]}"
+            for m in conversation_context[-6:]
+        ])
+    elif _conversation_history:
+        history_text = "\n".join([
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content'][:200]}"
+            for m in _conversation_history[-6:]
+        ])
 
-    return _build_fallback_answer(query, context_docs)
+    # store current query in history
+    _conversation_history.append({"role": "user", "content": query})
+    if len(_conversation_history) > MAX_HISTORY * 2:
+        _conversation_history = _conversation_history[-MAX_HISTORY:]
+
+    # try Gemini first, then OpenAI, then fallback
+    if GEMINI_API_KEY:
+        answer = _ask_gemini(query, context_text, history_text)
+        if answer:
+            _conversation_history.append({"role": "assistant", "content": answer})
+            return answer
+
+    if OPENAI_API_KEY:
+        answer = _ask_openai(query, context_text)
+        _conversation_history.append({"role": "assistant", "content": answer})
+        return answer
+
+    answer = _build_fallback_answer(query, context_docs)
+    _conversation_history.append({"role": "assistant", "content": answer})
+    return answer
+
+
+def _ask_gemini(query, context, history=""):
+    """Use Gemini LLM for intelligent answer generation."""
+    try:
+        from gemini_client import ask_gemini
+
+        history_section = ""
+        if history:
+            history_section = f"\nPrevious conversation:\n{history}\n"
+
+        prompt = f"""You are a cricket broadcast analytics assistant for Jio Hotstar. 
+You analyze brand advertisement visibility data from live cricket matches.
+
+Answer the user's question using ONLY the provided detection data. 
+Be precise with numbers, timestamps, brand names, and statistics.
+Provide analytical reasoning and context-aware insights.
+If the user's question is a follow-up, use the conversation history for context.
+{history_section}
+Detection data from the broadcast:
+{context}
+
+User question: {query}
+
+Provide a clear, well-structured answer with:
+1. Direct answer to the question
+2. Supporting data points
+3. Any relevant patterns or insights you notice
+4. Suggest a follow-up question the user might find useful"""
+
+        return ask_gemini(prompt, temperature=0.3, max_tokens=800)
+    except Exception as err:
+        log.error(f"Gemini RAG error: {err}")
+        return None
 
 
 def _ask_openai(query, context):
@@ -183,7 +259,7 @@ def _build_fallback_answer(query, docs):
 
     lines = [f"Query: {query}", f"Found {len(docs)} relevant records.", ""]
     for brand, cnt in sorted(brand_counts.items(), key=lambda x: -x[1]):
-        lines.append(f"{brand}: appeared {cnt} times")
+        lines.append(f"**{brand}**: appeared {cnt} times")
         if brand in brand_placements:
             pl_str = ", ".join(f"{k}: {v}" for k, v in brand_placements[brand].items())
             lines.append(f"  Placements: {pl_str}")
@@ -211,3 +287,10 @@ def clear_collection():
         name=COLLECTION_NAME, metadata={"hnsw:space": "cosine"}
     )
     log.info("Vector DB collection cleared.")
+
+
+def clear_conversation_history():
+    """Reset the conversation memory for the chatbot."""
+    global _conversation_history
+    _conversation_history = []
+    log.info("Conversation history cleared.")

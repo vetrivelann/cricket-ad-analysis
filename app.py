@@ -1,6 +1,6 @@
 """
 Streamlit dashboard for the Cricket Ad Detection system.
-Pages: Upload & Process, Analytics, AI Chatbot, Match History
+Pages: Upload & Process, Analytics, AI Insights, AI Chatbot, Match History
 """
 import os
 import sys
@@ -94,12 +94,37 @@ def load_styles():
         background: #f0f2f6; color: #1a1a2e;
         padding: 12px 18px; border-radius: 18px 18px 18px 4px;
         margin: 8px 0; max-width: 80%; border: 1px solid #e0e0e0;
+        white-space: pre-wrap;
     }
 
     .sec-head {
         font-size: 1.4rem; font-weight: 700; color: #1a1a2e;
         margin: 24px 0 12px 0; padding-bottom: 8px;
         border-bottom: 3px solid #667eea; display: inline-block;
+    }
+
+    .insight-card {
+        background: linear-gradient(135deg, #f5f7ff, #eef2ff);
+        border-left: 4px solid #667eea;
+        border-radius: 0 12px 12px 0;
+        padding: 20px 24px;
+        margin: 12px 0;
+        line-height: 1.8;
+        white-space: pre-wrap;
+    }
+
+    .ai-badge {
+        display: inline-block;
+        background: linear-gradient(135deg, #667eea, #764ba2);
+        color: white; padding: 3px 10px; border-radius: 12px;
+        font-size: 0.7rem; font-weight: 600; margin-left: 8px;
+        vertical-align: middle;
+    }
+
+    .followup-btn {
+        background: #f0f2ff; border: 1px solid #d0d5ff;
+        border-radius: 8px; padding: 8px 12px; margin: 4px;
+        cursor: pointer; font-size: 0.85rem; color: #4a5568;
     }
 
     #MainMenu {visibility: hidden;}
@@ -135,17 +160,41 @@ def sidebar():
         st.markdown("## Navigation")
         page = st.radio(
             "Go to",
-            ["Upload & Process", "Analytics Dashboard", "AI Chatbot", "Match History"],
+            ["Upload & Process", "Analytics Dashboard", "AI Insights", "AI Chatbot", "Match History"],
             label_visibility="collapsed",
         )
         st.markdown("---")
         st.markdown("### Settings")
         fps = st.slider("Frame rate (FPS)", 0.5, 5.0, 1.0, 0.5)
         do_chunks = st.checkbox("Extract video chunks", value=True)
+
+        # Gemini status indicator
+        st.markdown("---")
+        st.markdown("### AI Status")
+        try:
+            from gemini_client import is_available, reset as gemini_reset, test_connection
+            from config import GEMINI_API_KEY
+            if not GEMINI_API_KEY:
+                st.warning("Gemini LLM: No API key set", icon="⚠️")
+                st.caption("Set GEMINI_API_KEY in .env file")
+            elif is_available():
+                st.success("Gemini LLM: Connected", icon="🤖")
+            else:
+                status_msg = test_connection()
+                if "rate-limited" in status_msg.lower() or "connected" in status_msg.lower():
+                    st.success("Gemini LLM: Connected", icon="🤖")
+                else:
+                    st.warning(f"Gemini LLM: {status_msg}", icon="⚠️")
+                    if st.button("Retry Connection", key="retry_gemini"):
+                        gemini_reset()
+                        st.rerun()
+        except Exception as e:
+            st.warning(f"Gemini LLM: {e}", icon="⚠️")
+
         st.markdown("---")
         st.markdown(
             "<div style='text-align:center;opacity:0.5;font-size:0.8rem;'>"
-            "Cricket Ad Analytics v1.0<br/>Jio Hotstar</div>",
+            "Cricket Ad Analytics v2.0<br/>AI-Powered | Jio Hotstar</div>",
             unsafe_allow_html=True,
         )
         return page, fps, do_chunks
@@ -352,25 +401,6 @@ def page_analytics():
                            font=dict(family="Inter"))
         st.plotly_chart(fig5, use_container_width=True)
 
-    # detection timeline
-    st.markdown("#### Detection Timeline")
-    tl_data = [{
-        "Brand": d.brand_name, "Time (s)": d.timestamp,
-        "Confidence": d.confidence, "Placement": d.placement,
-    } for d in dets]
-
-    if tl_data:
-        fig6 = px.scatter(tl_data, x="Time (s)", y="Brand",
-                          color="Placement", size="Confidence",
-                          hover_data=["Confidence", "Placement"],
-                          color_discrete_sequence=px.colors.qualitative.Vivid)
-        unique_brands = set(d.brand_name for d in dets)
-        fig6.update_layout(height=max(300, len(unique_brands) * 40),
-                           plot_bgcolor="rgba(0,0,0,0)",
-                           paper_bgcolor="rgba(0,0,0,0)",
-                           font=dict(family="Inter"))
-        st.plotly_chart(fig6, use_container_width=True)
-
     # raw data table
     st.markdown("#### Detection Records")
     df = pd.DataFrame([{
@@ -398,19 +428,152 @@ def page_analytics():
         st.info("No video chunks available.")
 
 
+# --------------- Page: AI Insights ---------------
+
+def page_insights():
+    st.markdown(
+        '<div class="sec-head">AI-Powered Insights</div>'
+        '<span class="ai-badge">Gemini LLM</span>',
+        unsafe_allow_html=True,
+    )
+
+    from database import SessionLocal, get_all_matches, get_detections, get_aggregates
+
+    db = SessionLocal()
+    try:
+        matches = get_all_matches(db)
+    finally:
+        db.close()
+
+    if not matches:
+        st.info("No matches processed yet. Upload a video first.")
+        return
+
+    options = {
+        f"{m.match_id} ({m.team_a} vs {m.team_b})": m.match_id
+        for m in matches
+    }
+    pick = st.selectbox("Select Match", list(options.keys()), key="insight_match")
+    chosen_id = options[pick]
+
+    db = SessionLocal()
+    try:
+        match_obj = next((m for m in matches if m.match_id == chosen_id), None)
+        dets = get_detections(db, chosen_id)
+        aggs = get_aggregates(db, chosen_id)
+    finally:
+        db.close()
+
+    if not dets:
+        st.warning("No detections found for this match.")
+        return
+
+    # convert DB objects to dicts for insights module
+    det_dicts = [{
+        "brand_name": d.brand_name,
+        "confidence": d.confidence,
+        "timestamp": d.timestamp,
+        "placement": d.placement,
+        "event": d.event,
+        "detection_source": d.detection_source,
+    } for d in dets]
+
+    agg_dicts = [{
+        "brand_name": a.brand_name,
+        "total_duration": a.total_duration,
+        "visibility_ratio": a.visibility_ratio,
+        "detection_count": a.detection_count,
+        "avg_confidence": a.avg_confidence,
+        "placement_distribution": a.placement_distribution,
+        "event_distribution": a.event_distribution,
+    } for a in aggs]
+
+    match_info = {
+        "team_a": match_obj.team_a if match_obj else "Team A",
+        "team_b": match_obj.team_b if match_obj else "Team B",
+        "match_type": match_obj.match_type if match_obj else "T20",
+        "location": match_obj.location if match_obj else "Unknown",
+    }
+
+    if st.button("Generate AI Insights", type="primary", use_container_width=True):
+        with st.spinner("Analyzing data with AI..."):
+            try:
+                from insights import generate_insights
+                result = generate_insights(det_dicts, agg_dicts, match_info)
+
+                source = result.get("source", "unknown")
+                if source == "gemini":
+                    st.success("Insights generated using Gemini LLM", icon="🤖")
+                else:
+                    st.info("Insights generated using rule-based analysis (set GEMINI_API_KEY for AI-powered insights)", icon="📊")
+
+                st.markdown('<div class="insight-card">', unsafe_allow_html=True)
+                st.markdown(result["content"])
+                st.markdown('</div>', unsafe_allow_html=True)
+
+                # show raw stats in expander
+                with st.expander("Raw Statistics Data"):
+                    stats = result.get("stats", {})
+                    if stats.get("brand_ranking"):
+                        st.markdown("**Brand Ranking:**")
+                        for brand, count in stats["brand_ranking"]:
+                            st.write(f"  • {brand}: {count} detections")
+
+                    if stats.get("aggregates"):
+                        st.markdown("**Visibility Metrics:**")
+                        agg_df = pd.DataFrame(stats["aggregates"])
+                        st.dataframe(agg_df, use_container_width=True)
+
+            except Exception as e:
+                st.error(f"Failed to generate insights: {e}")
+                log.error(f"Insights error: {e}", exc_info=True)
+
+    # report generation section
+    st.markdown("---")
+    st.markdown("#### Generate Reports")
+    r1, r2 = st.columns(2)
+    with r1:
+        if st.button("Generate HTML Report", use_container_width=True):
+            with st.spinner("Building report..."):
+                try:
+                    from report_generator import generate_html_report
+                    path = generate_html_report(chosen_id)
+                    st.success(f"Report saved: {os.path.basename(path)}")
+                    with open(path, "r", encoding="utf-8") as f:
+                        st.download_button("Download HTML Report", f.read(),
+                                           file_name=os.path.basename(path),
+                                           mime="text/html")
+                except Exception as e:
+                    st.error(f"Report failed: {e}")
+    with r2:
+        if st.button("Generate CSV Report", use_container_width=True):
+            with st.spinner("Building CSV..."):
+                try:
+                    from report_generator import generate_csv_report
+                    path = generate_csv_report(chosen_id)
+                    st.success(f"CSV saved: {os.path.basename(path)}")
+                    with open(path, "r", encoding="utf-8") as f:
+                        st.download_button("Download CSV", f.read(),
+                                           file_name=os.path.basename(path),
+                                           mime="text/csv")
+                except Exception as e:
+                    st.error(f"CSV failed: {e}")
+
+
 # --------------- Page: AI Chatbot ---------------
 
 def page_chatbot():
     st.markdown('<div class="sec-head">AI Analytics Chatbot</div>', unsafe_allow_html=True)
-    st.markdown("Ask questions about brand visibility, placements, or match events.")
+    st.markdown("Ask questions about brand visibility, placements, or match events. "
+                "The chatbot remembers conversation context for follow-up questions.")
 
     # quick query buttons
     st.markdown("**Quick queries:**")
     qcols = st.columns(3)
     quick = [
         "Which brand appeared most frequently?",
-        "How many times did Pepsi appear during a six?",
-        "Show placement distribution for all brands",
+        "What are the top ad placements?",
+        "Show event-based brand performance",
     ]
     for i, q in enumerate(quick):
         with qcols[i]:
@@ -418,7 +581,26 @@ def page_chatbot():
                 st.session_state.chat_history.append({"role": "user", "content": q})
                 try:
                     from rag import answer_query
-                    ans = answer_query(q)
+                    ans = answer_query(q, conversation_context=st.session_state.chat_history)
+                except Exception as e:
+                    ans = f"Error: {e}"
+                st.session_state.chat_history.append({"role": "assistant", "content": ans})
+
+    # follow-up suggestions
+    qcols2 = st.columns(4)
+    followups = [
+        "Tell me more about that",
+        "Compare top 3 brands",
+        "Which brand had best ROI?",
+        "Suggest placement improvements",
+    ]
+    for i, q in enumerate(followups):
+        with qcols2[i]:
+            if st.button(f"💡 {q}", key=f"fu_{i}", use_container_width=True):
+                st.session_state.chat_history.append({"role": "user", "content": q})
+                try:
+                    from rag import answer_query
+                    ans = answer_query(q, conversation_context=st.session_state.chat_history)
                 except Exception as e:
                     ans = f"Error: {e}"
                 st.session_state.chat_history.append({"role": "assistant", "content": ans})
@@ -441,7 +623,7 @@ def page_chatbot():
         with st.spinner("Thinking..."):
             try:
                 from rag import answer_query
-                ans = answer_query(user_msg)
+                ans = answer_query(user_msg, conversation_context=st.session_state.chat_history)
             except Exception as e:
                 ans = f"Error: {e}"
         st.session_state.chat_history.append({"role": "assistant", "content": ans})
@@ -450,6 +632,11 @@ def page_chatbot():
     if st.session_state.chat_history:
         if st.button("Clear Chat"):
             st.session_state.chat_history = []
+            try:
+                from rag import clear_conversation_history
+                clear_conversation_history()
+            except Exception:
+                pass
             st.rerun()
 
 
@@ -509,6 +696,8 @@ def main():
         page_upload(fps, do_chunks)
     elif page == "Analytics Dashboard":
         page_analytics()
+    elif page == "AI Insights":
+        page_insights()
     elif page == "AI Chatbot":
         page_chatbot()
     elif page == "Match History":

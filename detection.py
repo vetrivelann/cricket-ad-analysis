@@ -1,6 +1,13 @@
 """
 Brand detection using YOLOv8 and OCR.
-Also handles placement classification and event detection.
+Handles placement classification and event detection.
+
+Rules:
+  - We ONLY report brands we can actually verify.
+  - YOLO detects COCO objects -> mapped to likely brands via BRAND_LABEL_MAP.
+  - OCR reads text from the frame -> matches against KNOWN_BRANDS.
+  - OCR text overrides YOLO brand labels when actual brand text is found.
+  - NO mock/fake data is ever generated. If nothing is detected, return empty.
 """
 import logging
 import random
@@ -23,7 +30,7 @@ def _load_yolo():
         _yolo_model = YOLO(YOLO_MODEL)
         log.info("YOLO model loaded.")
     except Exception as err:
-        log.warning(f"Could not load YOLO ({err}), will use mock detections.")
+        log.warning(f"Could not load YOLO ({err}). YOLO detection disabled.")
         _yolo_model = None
     return _yolo_model
 
@@ -36,19 +43,64 @@ def _tesseract_available():
         import pytesseract
         pytesseract.get_tesseract_version()
         _tesseract_ok = True
+        log.info("Tesseract OCR is available.")
     except Exception:
+        log.warning("Tesseract OCR not available. OCR detection disabled.")
         _tesseract_ok = False
     return _tesseract_ok
 
 
+# ---- OCR text extraction ----
+
+def _extract_frame_text(frame):
+    """Extract all readable text from a frame using OCR. Returns uppercase text."""
+    if not _tesseract_available():
+        return ""
+    try:
+        import pytesseract
+        import cv2
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (3, 3), 0)
+        _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        text = pytesseract.image_to_string(thresh, config="--psm 6").upper()
+        return text
+    except Exception:
+        return ""
+
+
+def _correct_brand_from_ocr(detected_brand, frame_text):
+    """
+    Use OCR text to correct YOLO's brand assignment.
+    If OCR finds actual brand text in the frame, override the COCO-based label.
+    """
+    from config import BRAND_TEXT_PATTERNS
+
+    if not frame_text:
+        return detected_brand
+
+    for pattern, correct_brand in BRAND_TEXT_PATTERNS.items():
+        if pattern in frame_text:
+            if correct_brand != detected_brand:
+                log.debug(
+                    f"Brand correction: '{detected_brand}' -> '{correct_brand}' "
+                    f"(OCR found '{pattern}')"
+                )
+            return correct_brand
+
+    return detected_brand
+
+
 # ---- YOLO-based brand detection ----
 
-def detect_brands_yolo(frame, conf_threshold=0.35):
+def detect_brands_yolo(frame, conf_threshold=0.35, frame_text=""):
+    """Detect brands using YOLO object detection.
+    Returns empty list if YOLO is not available (no mock data).
+    """
     from config import BRAND_LABEL_MAP, YOLO_CONFIDENCE
 
     model = _load_yolo()
     if model is None:
-        return _mock_yolo(frame)
+        return []
 
     threshold = conf_threshold or YOLO_CONFIDENCE
     results = model(frame, conf=threshold, verbose=False)
@@ -64,9 +116,10 @@ def detect_brands_yolo(frame, conf_threshold=0.35):
             class_name = model.names.get(cls_id, f"class_{cls_id}")
 
             brand = BRAND_LABEL_MAP.get(class_name)
-            if brand and brand not in ("Player_Detected",):
+            if brand and brand not in ("Player_Detected", "Scoreboard_Zone", "Overlay_Zone"):
+                corrected_brand = _correct_brand_from_ocr(brand, frame_text)
                 found.append({
-                    "brand_name": brand,
+                    "brand_name": corrected_brand,
                     "confidence": round(conf, 4),
                     "bbox": [round(b, 1) for b in bbox],
                     "class_name": class_name,
@@ -74,40 +127,20 @@ def detect_brands_yolo(frame, conf_threshold=0.35):
     return found
 
 
-def _mock_yolo(frame):
-    from config import KNOWN_BRANDS
-    h, w = frame.shape[:2]
-    count = random.randint(0, 3)
-    out = []
-    for _ in range(count):
-        x1 = random.randint(0, max(1, w - 100))
-        y1 = random.randint(0, max(1, h - 100))
-        x2 = min(x1 + random.randint(50, 150), w)
-        y2 = min(y1 + random.randint(50, 100), h)
-        out.append({
-            "brand_name": random.choice(KNOWN_BRANDS),
-            "confidence": round(random.uniform(0.4, 0.95), 4),
-            "bbox": [x1, y1, x2, y2],
-            "class_name": "mock",
-        })
-    return out
-
-
 # ---- OCR-based brand detection ----
 
-def detect_brands_ocr(frame):
+def detect_brands_ocr(frame, frame_text=""):
+    """Detect brands by reading text from the frame.
+    Returns empty list if Tesseract is not available (no mock data).
+    """
     from config import KNOWN_BRANDS
 
     if not _tesseract_available():
-        return _mock_ocr(frame)
+        return []
 
-    import pytesseract
-    import cv2
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (3, 3), 0)
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    text = pytesseract.image_to_string(thresh, config="--psm 6").upper()
+    text = frame_text if frame_text else _extract_frame_text(frame)
+    if not text.strip():
+        return []
 
     found = []
     h, w = frame.shape[:2]
@@ -122,21 +155,7 @@ def detect_brands_ocr(frame):
     return found
 
 
-def _mock_ocr(frame):
-    from config import KNOWN_BRANDS
-    h, w = frame.shape[:2]
-    if random.random() < 0.3:
-        brand = random.choice(KNOWN_BRANDS[:5])
-        return [{
-            "brand_name": brand,
-            "confidence": round(random.uniform(0.5, 0.8), 4),
-            "bbox": [0, 0, w, h],
-            "class_name": "mock_ocr",
-        }]
-    return []
-
-
-# ---- Placement classification (rule-based) ----
+# ---- Placement classification ----
 
 def classify_placement(bbox, frame_height):
     from config import PLACEMENT_RULES
@@ -153,41 +172,91 @@ def classify_placement(bbox, frame_height):
     return "other"
 
 
-# ---- Event detection from scoreboard region ----
+# ---- Event detection ----
 
-def detect_event(frame):
+def detect_event(frame, frame_text=""):
+    """Detect cricket events from scoreboard text.
+    Returns 'none' if nothing is found (no random events).
+    """
     from config import EVENT_KEYWORDS
 
-    if _tesseract_available():
-        import pytesseract
+    if not _tesseract_available():
+        return "none"
+
+    try:
         import cv2
+        import pytesseract
         h, w = frame.shape[:2]
         top_strip = frame[0:int(h * 0.15), :]
         gray = cv2.cvtColor(top_strip, cv2.COLOR_BGR2GRAY)
-        text = pytesseract.image_to_string(gray, config="--psm 7").upper().strip()
+        scoreboard_text = pytesseract.image_to_string(
+            gray, config="--psm 7"
+        ).upper().strip()
+
         for keyword, event_name in EVENT_KEYWORDS.items():
-            if keyword in text:
+            if keyword in scoreboard_text:
                 return event_name
-    else:
-        choices = ["none", "none", "none", "none", "six", "four", "wicket"]
-        return random.choice(choices)
+
+        # try Gemini for nuanced classification
+        if scoreboard_text and len(scoreboard_text) > 3:
+            gemini_event = _classify_event_gemini(scoreboard_text, frame_text)
+            if gemini_event:
+                return gemini_event
+    except Exception as err:
+        log.debug(f"Event detection error: {err}")
 
     return "none"
+
+
+def _classify_event_gemini(scoreboard_text, frame_text=""):
+    """Use Gemini LLM to classify cricket events from OCR text."""
+    try:
+        from gemini_client import ask_gemini_json, is_available
+        if not is_available():
+            return None
+
+        combined_context = f"Scoreboard: {scoreboard_text}"
+        if frame_text:
+            combined_context += f"\nFrame text: {frame_text[:200]}"
+
+        prompt = f"""Classify this cricket broadcast text into one of these events:
+SIX, FOUR, WICKET, WIDE, NO_BALL, or NONE (for normal play).
+
+Text from broadcast frame:
+{combined_context}
+
+Respond with JSON: {{"event": "<event_type>", "confidence": <0.0-1.0>}}"""
+
+        result = ask_gemini_json(prompt, temperature=0.1, max_tokens=100)
+        if result and isinstance(result, dict):
+            event = result.get("event", "none").lower()
+            confidence = float(result.get("confidence", 0))
+            if confidence >= 0.7 and event != "none":
+                return event
+    except Exception as err:
+        log.debug(f"Gemini event classification failed: {err}")
+    return None
 
 
 # ---- Combined detection on a single frame ----
 
 def detect_all(frame, timestamp, frame_index, match_id):
-    """Run both YOLO and OCR on one frame, classify placement/event, return DB-ready records."""
+    """Run YOLO and OCR on one frame, classify placement/event,
+    return DB-ready records. Only reports verified detections.
+    """
     h = frame.shape[0]
-    event = detect_event(frame)
 
-    yolo_hits = detect_brands_yolo(frame)
-    ocr_hits = detect_brands_ocr(frame)
+    # extract OCR text once and reuse everywhere
+    frame_text = _extract_frame_text(frame)
+
+    event = detect_event(frame, frame_text)
+    yolo_hits = detect_brands_yolo(frame, frame_text=frame_text)
+    ocr_hits = detect_brands_ocr(frame, frame_text=frame_text)
 
     records = []
     seen_brands = set()
 
+    # YOLO detections first (higher confidence)
     for det in yolo_hits:
         seen_brands.add(det["brand_name"])
         records.append({
@@ -202,8 +271,10 @@ def detect_all(frame, timestamp, frame_index, match_id):
             "detection_source": "yolo",
         })
 
+    # OCR detections (add only new brands)
     for det in ocr_hits:
         if det["brand_name"] not in seen_brands:
+            seen_brands.add(det["brand_name"])
             records.append({
                 "match_id": match_id,
                 "brand_name": det["brand_name"],

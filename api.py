@@ -1,5 +1,6 @@
 """
 FastAPI endpoints for the Cricket Ad Detection system.
+Enhanced with AI insights and Gemini-powered analytics.
 """
 import os
 import shutil
@@ -18,8 +19,8 @@ log = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Cricket Ad Detection API",
-    description="Detect and analyze brand advertisements in cricket broadcasts",
-    version="1.0.0",
+    description="AI-powered brand advertisement detection and analytics for cricket broadcasts",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -36,7 +37,18 @@ class QueryRequest(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "cricket-ad-detection"}
+    gemini_ok = False
+    try:
+        from gemini_client import is_available
+        gemini_ok = is_available()
+    except Exception:
+        pass
+    return {
+        "status": "ok",
+        "service": "cricket-ad-detection",
+        "version": "2.0.0",
+        "gemini_available": gemini_ok,
+    }
 
 
 @app.post("/upload")
@@ -170,6 +182,72 @@ def rag_query(req: QueryRequest):
     if not req.question.strip():
         raise HTTPException(400, "Empty question")
     return {"question": req.question, "answer": answer_query(req.question)}
+
+
+@app.get("/insights/{match_id}")
+def get_insights(match_id: str):
+    """Generate AI-powered insights for a processed match."""
+    from database import SessionLocal, get_match, get_detections, get_aggregates
+    from insights import generate_insights
+
+    db = SessionLocal()
+    try:
+        match = get_match(db, match_id)
+        if not match:
+            raise HTTPException(404, "Match not found")
+
+        dets = get_detections(db, match_id)
+        aggs = get_aggregates(db, match_id)
+
+        if not dets:
+            raise HTTPException(400, "No detections found for this match")
+
+        det_dicts = [{
+            "brand_name": d.brand_name, "confidence": d.confidence,
+            "timestamp": d.timestamp, "placement": d.placement,
+            "event": d.event, "detection_source": d.detection_source,
+        } for d in dets]
+
+        agg_dicts = [{
+            "brand_name": a.brand_name,
+            "total_duration": a.total_duration,
+            "visibility_ratio": a.visibility_ratio,
+            "detection_count": a.detection_count,
+            "avg_confidence": a.avg_confidence,
+            "placement_distribution": a.placement_distribution,
+            "event_distribution": a.event_distribution,
+        } for a in aggs]
+
+        match_info = {
+            "team_a": match.team_a,
+            "team_b": match.team_b,
+            "match_type": match.match_type,
+            "location": match.location,
+        }
+
+        result = generate_insights(det_dicts, agg_dicts, match_info)
+        return {
+            "match_id": match_id,
+            "source": result.get("source", "unknown"),
+            "insights": result.get("content", ""),
+            "stats": result.get("stats", {}),
+        }
+    finally:
+        db.close()
+
+
+@app.get("/report/{match_id}")
+def generate_report(match_id: str):
+    """Generate and download an HTML report for a match."""
+    from report_generator import generate_html_report
+    try:
+        path = generate_html_report(match_id)
+        return FileResponse(path, media_type="text/html",
+                            filename=os.path.basename(path))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"Report generation failed: {e}")
 
 
 @app.get("/chunks/{brand}/{match_id}/{filename}")
